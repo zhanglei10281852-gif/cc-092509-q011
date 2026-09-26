@@ -9,6 +9,7 @@ from typing import Any
 from app.core.clock import Clock, SystemClock, to_storage
 from app.core.errors import ConflictError, NotFoundError, ValidationError
 from app.core.security import Principal
+from app.archives.incident_response import ensure_dossier_not_restricted
 from app.archives.repository import ApprovalRepository, VaultRepository, DossierRepository
 from app.services.audit import AuditService
 
@@ -141,6 +142,7 @@ class DisposalService:
         if existing:
             return {"record": dict(existing), "dossier": self.dossiers.get(approval["resource_id"]), "replayed": True}
         dossier = self.dossiers.get(approval["resource_id"])
+        ensure_dossier_not_restricted(self.connection, dossier["id"], "合规处置")
         quantity = float(approval["payload"].get("quantity", dossier["quantity"]))
         if quantity <= 0 or quantity > dossier["quantity"] - dossier["reserved_quantity"]:
             raise ConflictError("审批数量超过当前可合规处置数量")

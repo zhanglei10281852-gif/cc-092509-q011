@@ -7,7 +7,9 @@ from fastapi.responses import JSONResponse
 
 from app.api import audit, auth, roles, system, users
 from app.core.errors import DomainError
-from app.database import close_connection, init_db
+from app.database import close_connection, init_db, transaction
+from app.archives.incident_response import IncidentResponseService
+from app.archives.incident_router import router as incident_router
 from app.archives.router import router as archives_router
 from app.archives.extended_router import router as archive_operations_router
 
@@ -16,6 +18,9 @@ from app.archives.extended_router import router as archive_operations_router
 async def lifespan(app: FastAPI):
     del app
     init_db()
+    # 服务恢复后按事件状态重建限制：未结案事件重新隔离，已结案事件解除遗留隔离
+    with transaction(immediate=True) as connection:
+        IncidentResponseService(connection).rebuild_restrictions()
     yield
     close_connection()
 
@@ -39,6 +44,7 @@ app.include_router(audit.router)
 app.include_router(system.router)
 app.include_router(archives_router)
 app.include_router(archive_operations_router)
+app.include_router(incident_router)
 
 
 @app.get("/")

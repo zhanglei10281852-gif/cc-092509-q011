@@ -311,6 +311,7 @@ CREATE TABLE IF NOT EXISTS incident_cases (
     case_code TEXT NOT NULL UNIQUE,
     dossier_id INTEGER REFERENCES dossiers(id),
     intake_id INTEGER REFERENCES intake_batches(id),
+    clue_key TEXT,
     incident_type TEXT NOT NULL,
     severity TEXT NOT NULL CHECK(severity IN ('low','medium','high','critical')),
     state TEXT NOT NULL CHECK(state IN ('open','investigating','contained','resolved','dismissed')),
@@ -335,6 +336,75 @@ CREATE TABLE IF NOT EXISTS dossier_events (
     occurred_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_dossier_events_dossier ON dossier_events(dossier_id, id);
+
+CREATE TABLE IF NOT EXISTS incident_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id INTEGER NOT NULL REFERENCES incident_cases(id) ON DELETE CASCADE,
+    link_type TEXT NOT NULL CHECK(link_type IN ('dossier','copy','session')),
+    dossier_id INTEGER REFERENCES dossiers(id),
+    session_id INTEGER REFERENCES sessions(id),
+    auto_linked INTEGER NOT NULL DEFAULT 0 CHECK(auto_linked IN (0,1)),
+    note TEXT NOT NULL DEFAULT '',
+    linked_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL,
+    CHECK ((link_type='session' AND session_id IS NOT NULL AND dossier_id IS NULL)
+        OR (link_type IN ('dossier','copy') AND dossier_id IS NOT NULL AND session_id IS NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_incident_links_dossier
+    ON incident_links(case_id, link_type, dossier_id) WHERE dossier_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_incident_links_session
+    ON incident_links(case_id, session_id) WHERE session_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS incident_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id INTEGER NOT NULL REFERENCES incident_cases(id) ON DELETE CASCADE,
+    dossier_id INTEGER NOT NULL REFERENCES dossiers(id),
+    state_before TEXT NOT NULL,
+    quantity REAL NOT NULL,
+    reserved_quantity REAL NOT NULL,
+    vault_id INTEGER,
+    custody_user_id INTEGER,
+    dossier_version INTEGER NOT NULL,
+    snapshot_digest TEXT NOT NULL,
+    released_at TEXT,
+    released_by INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL,
+    UNIQUE(case_id, dossier_id)
+);
+CREATE INDEX IF NOT EXISTS idx_incident_snapshots_active ON incident_snapshots(dossier_id, released_at);
+
+CREATE TABLE IF NOT EXISTS incident_assignments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id INTEGER NOT NULL REFERENCES incident_cases(id) ON DELETE CASCADE,
+    investigator_user_id INTEGER NOT NULL REFERENCES users(id),
+    assigned_by INTEGER NOT NULL REFERENCES users(id),
+    assigned_at TEXT NOT NULL,
+    revoked_at TEXT,
+    revoked_by INTEGER REFERENCES users(id),
+    UNIQUE(case_id, investigator_user_id)
+);
+
+CREATE TABLE IF NOT EXISTS incident_evidence (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id INTEGER NOT NULL REFERENCES incident_cases(id) ON DELETE CASCADE,
+    evidence_code TEXT NOT NULL UNIQUE,
+    kind TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT '',
+    submitted_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_incident_evidence_case ON incident_evidence(case_id, id);
+
+CREATE TABLE IF NOT EXISTS incident_timeline (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id INTEGER NOT NULL REFERENCES incident_cases(id) ON DELETE CASCADE,
+    entry_type TEXT NOT NULL,
+    body TEXT NOT NULL,
+    actor_user_id INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_incident_timeline_case ON incident_timeline(case_id, id);
 """
 
 PERMISSIONS = [
@@ -401,11 +471,22 @@ def transaction(*, immediate: bool = False) -> Iterator[sqlite3.Connection]:
         connection.commit()
 
 
+def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    """为已存在的数据库补充新增列（CREATE TABLE IF NOT EXISTS 不会修改旧表）。"""
+    columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+
 def init_db() -> None:
     now = to_storage(utc_now())
     connection = get_connection()
     connection.executescript(SCHEMA)
     with transaction(immediate=True) as connection:
+        _ensure_column(connection, "incident_cases", "clue_key", "clue_key TEXT")
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_incident_cases_clue ON incident_cases(clue_key)"
+        )
         for code, name, resource, action in PERMISSIONS:
             connection.execute(
                 "INSERT OR IGNORE INTO permissions(code,name,resource,action) VALUES(?,?,?,?)",

@@ -10,6 +10,7 @@ from typing import Any
 from app.core.clock import Clock, SystemClock, to_storage
 from app.core.errors import ConflictError, NotFoundError, ValidationError
 from app.core.security import Principal
+from app.archives.incident_response import ensure_dossier_not_restricted
 from app.archives.repository import IncidentRepository, ApprovalRepository, IntakeRepository, VaultRepository, DossierRepository
 from app.archives.validation import require_code
 from app.services.audit import AuditService
@@ -108,6 +109,7 @@ class DossierLifecycleService:
     def issue_copy(self, principal: Principal, dossier_id: int, data: dict[str, Any]) -> dict[str, Any]:
         principal.require("dossiers.write")
         parent = self.dossiers.get(dossier_id)
+        ensure_dossier_not_restricted(self.connection, dossier_id, "受控副本签发")
         total = round(sum(item["quantity"] for item in data["children"]) + data.get("loss_quantity", 0), 9)
         if abs(total - data["requested_quantity"]) > 1e-6:
             raise ValidationError("子样数量与损耗之和必须等于受控副本签发数量")
@@ -149,6 +151,7 @@ class DossierLifecycleService:
     def disclose(self, principal: Principal, dossier_id: int, data: dict[str, Any]) -> dict[str, Any]:
         principal.require("dossiers.disclose")
         dossier = self.dossiers.get(dossier_id)
+        ensure_dossier_not_restricted(self.connection, dossier_id, "对外披露")
         if dossier["lifecycle_state"] in {"disposed", "pending_disposal", "quarantined"}:
             raise ConflictError("当前状态禁止披露使用")
         existing = self.connection.execute(
@@ -184,6 +187,7 @@ class AccessLoanService:
     def create(self, principal: Principal, data: dict[str, Any]) -> dict[str, Any]:
         principal.require("access_loans.manage")
         dossier = self.dossiers.get(data["dossier_id"])
+        ensure_dossier_not_restricted(self.connection, data["dossier_id"], "查阅借阅")
         if dossier["lifecycle_state"] not in {"available", "partially_disclosed"}:
             raise ConflictError("档案当前不可查阅借阅")
         if dossier["quantity"] - dossier["reserved_quantity"] < data["quantity"]:
@@ -244,6 +248,8 @@ class ApprovalService:
     def create(self, principal: Principal, data: dict[str, Any]) -> dict[str, Any]:
         if data["action_type"] == "disposal":
             principal.require("dossiers.dispose")
+            if data["resource_type"] == "dossier":
+                ensure_dossier_not_restricted(self.connection, data["resource_id"], "合规处置申请")
         elif data["action_type"] == "inventory_review_adjustment":
             principal.require("inventory_review.manage")
         else:
