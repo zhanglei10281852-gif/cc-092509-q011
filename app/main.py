@@ -7,7 +7,8 @@ from fastapi.responses import JSONResponse
 
 from app.api import audit, auth, roles, system, users
 from app.core.errors import DomainError
-from app.database import close_connection, init_db
+from app.database import close_connection, init_db, transaction
+from app.archives.incident_response import IncidentResponseService
 from app.archives.router import router as archives_router
 from app.archives.extended_router import router as archive_operations_router
 
@@ -16,6 +17,8 @@ from app.archives.extended_router import router as archive_operations_router
 async def lifespan(app: FastAPI):
     del app
     init_db()
+    with transaction(immediate=True) as connection:
+        IncidentResponseService(connection).rebuild_restrictions()
     yield
     close_connection()
 

@@ -79,16 +79,57 @@ class ApprovalDecision(BaseModel):
     comment: str = Field(default="", max_length=500)
 
 
-class IncidentCreate(BaseModel):
+class IncidentReportCreate(BaseModel):
     case_code: str | None = Field(default=None, max_length=64)
+    clue_key: str | None = Field(default=None, max_length=200)
     dossier_id: int | None = Field(default=None, gt=0)
     intake_id: int | None = Field(default=None, gt=0)
+    dossier_ids: list[int] = Field(default_factory=list, max_length=200)
+    session_ids: list[int] = Field(default_factory=list, max_length=200)
+    copy_ids: list[int] = Field(default_factory=list, max_length=200)
     incident_type: str = Field(min_length=2, max_length=100)
     severity: Literal["low", "medium", "high", "critical"]
     description: str = Field(min_length=4, max_length=2000)
 
     @model_validator(mode="after")
     def ensure_target(self):
-        if not self.dossier_id and not self.intake_id:
-            raise ValueError("dossier_id 与 intake_id 至少填写一个")
+        if not (self.dossier_id or self.intake_id or self.dossier_ids or self.session_ids or self.copy_ids):
+            raise ValueError("至少关联一个档案、移交批次、会话或副本")
         return self
+
+
+class IncidentLinksAdd(BaseModel):
+    dossier_ids: list[int] = Field(default_factory=list, max_length=200)
+    session_ids: list[int] = Field(default_factory=list, max_length=200)
+    copy_ids: list[int] = Field(default_factory=list, max_length=200)
+
+    @model_validator(mode="after")
+    def ensure_any(self):
+        if not (self.dossier_ids or self.session_ids or self.copy_ids):
+            raise ValueError("至少关联一个档案、会话或副本")
+        return self
+
+
+class InvestigatorAssign(BaseModel):
+    user_id: int = Field(gt=0)
+
+
+class EvidenceAdd(BaseModel):
+    evidence_kind: str = Field(min_length=2, max_length=50)
+    label: str = Field(min_length=2, max_length=200)
+    uri: str | None = Field(default=None, max_length=500)
+    note: str = Field(default="", max_length=2000)
+
+
+class TimelineEntryCreate(BaseModel):
+    event_type: str = Field(min_length=2, max_length=100)
+    note: str = Field(default="", max_length=2000)
+    occurred_at: str | None = Field(default=None, min_length=10, max_length=40)
+
+
+class IncidentDismiss(BaseModel):
+    reason: str = Field(min_length=4, max_length=2000)
+
+
+class IncidentResolve(BaseModel):
+    resolution: str = Field(min_length=4, max_length=2000)

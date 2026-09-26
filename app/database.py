@@ -309,6 +309,7 @@ CREATE TABLE IF NOT EXISTS inventory_review_counts (
 CREATE TABLE IF NOT EXISTS incident_cases (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     case_code TEXT NOT NULL UNIQUE,
+    clue_key TEXT,
     dossier_id INTEGER REFERENCES dossiers(id),
     intake_id INTEGER REFERENCES intake_batches(id),
     incident_type TEXT NOT NULL,
@@ -317,10 +318,69 @@ CREATE TABLE IF NOT EXISTS incident_cases (
     detected_by INTEGER NOT NULL REFERENCES users(id),
     description TEXT NOT NULL,
     resolution TEXT,
+    report_count INTEGER NOT NULL DEFAULT 1,
     version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS incident_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id INTEGER NOT NULL REFERENCES incident_cases(id) ON DELETE CASCADE,
+    target_type TEXT NOT NULL CHECK(target_type IN ('dossier','session','copy')),
+    target_id INTEGER NOT NULL,
+    freeze_state TEXT NOT NULL DEFAULT 'frozen' CHECK(freeze_state IN ('frozen','released')),
+    linked_by INTEGER NOT NULL REFERENCES users(id),
+    linked_at TEXT NOT NULL,
+    released_at TEXT,
+    release_reason TEXT,
+    UNIQUE(case_id, target_type, target_id)
+);
+CREATE INDEX IF NOT EXISTS idx_incident_links_case ON incident_links(case_id, freeze_state);
+CREATE INDEX IF NOT EXISTS idx_incident_links_target ON incident_links(target_type, target_id, freeze_state);
+
+CREATE TABLE IF NOT EXISTS incident_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    link_id INTEGER NOT NULL UNIQUE REFERENCES incident_links(id) ON DELETE CASCADE,
+    case_id INTEGER NOT NULL REFERENCES incident_cases(id) ON DELETE CASCADE,
+    target_type TEXT NOT NULL,
+    target_id INTEGER NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_incident_snapshots_case ON incident_snapshots(case_id);
+
+CREATE TABLE IF NOT EXISTS incident_investigators (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id INTEGER NOT NULL REFERENCES incident_cases(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    assigned_by INTEGER NOT NULL REFERENCES users(id),
+    assigned_at TEXT NOT NULL,
+    UNIQUE(case_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS incident_evidence (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id INTEGER NOT NULL REFERENCES incident_cases(id) ON DELETE CASCADE,
+    evidence_kind TEXT NOT NULL,
+    label TEXT NOT NULL,
+    uri TEXT,
+    note TEXT NOT NULL DEFAULT '',
+    digest TEXT NOT NULL,
+    added_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_incident_evidence_case ON incident_evidence(case_id, id);
+
+CREATE TABLE IF NOT EXISTS incident_timeline (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id INTEGER NOT NULL REFERENCES incident_cases(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    actor_user_id INTEGER REFERENCES users(id),
+    occurred_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_incident_timeline_case ON incident_timeline(case_id, id);
 
 CREATE TABLE IF NOT EXISTS dossier_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -401,11 +461,20 @@ def transaction(*, immediate: bool = False) -> Iterator[sqlite3.Connection]:
         connection.commit()
 
 
+def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+
 def init_db() -> None:
     now = to_storage(utc_now())
     connection = get_connection()
     connection.executescript(SCHEMA)
     with transaction(immediate=True) as connection:
+        _ensure_column(connection, "incident_cases", "clue_key", "clue_key TEXT")
+        _ensure_column(connection, "incident_cases", "report_count", "report_count INTEGER NOT NULL DEFAULT 1")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_incident_clue ON incident_cases(clue_key)")
         for code, name, resource, action in PERMISSIONS:
             connection.execute(
                 "INSERT OR IGNORE INTO permissions(code,name,resource,action) VALUES(?,?,?,?)",

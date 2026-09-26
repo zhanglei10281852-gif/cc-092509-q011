@@ -108,6 +108,9 @@ class DossierLifecycleService:
     def issue_copy(self, principal: Principal, dossier_id: int, data: dict[str, Any]) -> dict[str, Any]:
         principal.require("dossiers.write")
         parent = self.dossiers.get(dossier_id)
+        frozen = IncidentRepository(self.connection).active_frozen_dossier_case(dossier_id)
+        if frozen:
+            raise ConflictError(f"档案因泄密事件 {frozen['case_code']} 隔离中，禁止签发受控副本")
         total = round(sum(item["quantity"] for item in data["children"]) + data.get("loss_quantity", 0), 9)
         if abs(total - data["requested_quantity"]) > 1e-6:
             raise ValidationError("子样数量与损耗之和必须等于受控副本签发数量")
@@ -149,6 +152,9 @@ class DossierLifecycleService:
     def disclose(self, principal: Principal, dossier_id: int, data: dict[str, Any]) -> dict[str, Any]:
         principal.require("dossiers.disclose")
         dossier = self.dossiers.get(dossier_id)
+        frozen = IncidentRepository(self.connection).active_frozen_dossier_case(dossier_id)
+        if frozen:
+            raise ConflictError(f"档案因泄密事件 {frozen['case_code']} 隔离中，禁止披露使用")
         if dossier["lifecycle_state"] in {"disposed", "pending_disposal", "quarantined"}:
             raise ConflictError("当前状态禁止披露使用")
         existing = self.connection.execute(
@@ -179,11 +185,15 @@ class AccessLoanService:
         self.connection = connection
         self.clock = clock or SystemClock()
         self.dossiers = DossierRepository(connection)
+        self.incidents = IncidentRepository(connection)
         self.audit = AuditService(connection, self.clock)
 
     def create(self, principal: Principal, data: dict[str, Any]) -> dict[str, Any]:
         principal.require("access_loans.manage")
         dossier = self.dossiers.get(data["dossier_id"])
+        frozen = self.incidents.active_frozen_dossier_case(data["dossier_id"])
+        if frozen:
+            raise ConflictError(f"档案因泄密事件 {frozen['case_code']} 隔离中，禁止查阅借阅")
         if dossier["lifecycle_state"] not in {"available", "partially_disclosed"}:
             raise ConflictError("档案当前不可查阅借阅")
         if dossier["quantity"] - dossier["reserved_quantity"] < data["quantity"]:
@@ -224,7 +234,9 @@ class AccessLoanService:
         )
         self.connection.execute(
             """UPDATE dossiers SET reserved_quantity=reserved_quantity-?,
-               lifecycle_state=CASE WHEN reserved_quantity-?=0 THEN CASE WHEN quantity=0 THEN 'disclosed' ELSE 'available' END ELSE 'access_loaned' END,
+               lifecycle_state=CASE WHEN lifecycle_state='quarantined' THEN 'quarantined'
+                                    WHEN reserved_quantity-?=0 THEN CASE WHEN quantity=0 THEN 'disclosed' ELSE 'available' END
+                                    ELSE 'access_loaned' END,
                version=version+1,updated_at=? WHERE id=?""",
             (data["quantity"], data["quantity"], now, access_loan["dossier_id"]),
         )
@@ -239,11 +251,16 @@ class ApprovalService:
         self.connection = connection
         self.clock = clock or SystemClock()
         self.approvals = ApprovalRepository(connection)
+        self.incidents = IncidentRepository(connection)
         self.audit = AuditService(connection, self.clock)
 
     def create(self, principal: Principal, data: dict[str, Any]) -> dict[str, Any]:
         if data["action_type"] == "disposal":
             principal.require("dossiers.dispose")
+            if data["resource_type"] == "dossier":
+                frozen = self.incidents.active_frozen_dossier_case(data["resource_id"])
+                if frozen:
+                    raise ConflictError(f"档案因泄密事件 {frozen['case_code']} 隔离中，禁止发起合规处置")
         elif data["action_type"] == "inventory_review_adjustment":
             principal.require("inventory_review.manage")
         else:
@@ -262,27 +279,3 @@ class ApprovalService:
         result = self.approvals.decide(request_id, principal.user_id, data["decision"], data.get("comment", ""), to_storage(self.clock.now()))
         self.audit.record(principal, "approval.decide", "approval_request", str(request_id), before=before, after=result)
         return result
-
-
-class IncidentService:
-    def __init__(self, connection: sqlite3.Connection, clock: Clock | None = None):
-        self.connection = connection
-        self.clock = clock or SystemClock()
-        self.incidents = IncidentRepository(connection)
-        self.dossiers = DossierRepository(connection)
-        self.audit = AuditService(connection, self.clock)
-
-    def create(self, principal: Principal, data: dict[str, Any]) -> dict[str, Any]:
-        principal.require("incidents.manage")
-        if not data.get("dossier_id") and not data.get("intake_id"):
-            raise ValidationError("泄密事件必须关联档案或移交批次")
-        if data.get("dossier_id"):
-            self.dossiers.get(data["dossier_id"])
-        case_code = data.get("case_code") or f"ANM-{uuid.uuid4().hex[:12]}"
-        case = self.incidents.create(data, principal.user_id, case_code, to_storage(self.clock.now()))
-        self.audit.record(principal, "incident.create", "incident_case", str(case["id"]), after=case)
-        return case
-
-    def list(self, principal: Principal, state: str | None) -> list[dict[str, Any]]:
-        principal.require("dossiers.read")
-        return self.incidents.list(state)

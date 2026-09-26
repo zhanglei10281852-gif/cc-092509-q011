@@ -7,7 +7,13 @@ from app.database import get_connection, transaction
 from app.core.security import Principal
 from app.archives.schemas import (
     CopyIssueRequest,
-    IncidentCreate,
+    EvidenceAdd,
+    IncidentDismiss,
+    IncidentLinksAdd,
+    IncidentReportCreate,
+    IncidentResolve,
+    InvestigatorAssign,
+    TimelineEntryCreate,
     ApprovalCreate,
     ApprovalDecision,
     BatchCreate,
@@ -17,7 +23,8 @@ from app.archives.schemas import (
     LocationCreate,
     DossierCreate,
 )
-from app.archives.service import IncidentService, ApprovalService, AccessLoanService, VaultService, DossierLifecycleService
+from app.archives.incident_response import IncidentResponseService
+from app.archives.service import ApprovalService, AccessLoanService, VaultService, DossierLifecycleService
 
 router = APIRouter(prefix="/api/dossiers", tags=["知识产权档案"])
 
@@ -96,11 +103,64 @@ def decide_approval(request_id: int, payload: ApprovalDecision, principal: Princ
 
 
 @router.post("/incidents", status_code=status.HTTP_201_CREATED)
-def create_incident(payload: IncidentCreate, principal: Principal = Depends(current_principal)):
+def create_incident(payload: IncidentReportCreate, principal: Principal = Depends(current_principal)):
     with transaction(immediate=True) as connection:
-        return IncidentService(connection).create(principal, payload.model_dump())
+        return IncidentResponseService(connection).report(principal, payload.model_dump())
 
 
 @router.get("/incidents/list")
 def list_incidents(state: str | None = None, principal: Principal = Depends(current_principal)):
-    return IncidentService(get_connection()).list(principal, state)
+    return IncidentResponseService(get_connection()).list(principal, state)
+
+
+@router.get("/incidents/{case_id}")
+def incident_detail(case_id: int, principal: Principal = Depends(current_principal)):
+    return IncidentResponseService(get_connection()).detail(principal, case_id)
+
+
+@router.post("/incidents/{case_id}/links", status_code=status.HTTP_201_CREATED)
+def add_incident_links(case_id: int, payload: IncidentLinksAdd, principal: Principal = Depends(current_principal)):
+    with transaction(immediate=True) as connection:
+        return IncidentResponseService(connection).add_links(principal, case_id, payload.model_dump())
+
+
+@router.post("/incidents/{case_id}/investigators", status_code=status.HTTP_201_CREATED)
+def assign_investigator(case_id: int, payload: InvestigatorAssign, principal: Principal = Depends(current_principal)):
+    with transaction(immediate=True) as connection:
+        return IncidentResponseService(connection).assign_investigator(principal, case_id, payload.user_id)
+
+
+@router.post("/incidents/{case_id}/evidence", status_code=status.HTTP_201_CREATED)
+def add_incident_evidence(case_id: int, payload: EvidenceAdd, principal: Principal = Depends(current_principal)):
+    with transaction(immediate=True) as connection:
+        return IncidentResponseService(connection).add_evidence(principal, case_id, payload.model_dump())
+
+
+@router.post("/incidents/{case_id}/timeline", status_code=status.HTTP_201_CREATED)
+def add_incident_timeline(case_id: int, payload: TimelineEntryCreate, principal: Principal = Depends(current_principal)):
+    with transaction(immediate=True) as connection:
+        return IncidentResponseService(connection).add_timeline_entry(principal, case_id, payload.model_dump())
+
+
+@router.post("/incidents/{case_id}/investigate")
+def investigate_incident(case_id: int, principal: Principal = Depends(current_principal)):
+    with transaction(immediate=True) as connection:
+        return IncidentResponseService(connection).investigate(principal, case_id)
+
+
+@router.post("/incidents/{case_id}/contain")
+def contain_incident(case_id: int, principal: Principal = Depends(current_principal)):
+    with transaction(immediate=True) as connection:
+        return IncidentResponseService(connection).contain(principal, case_id)
+
+
+@router.post("/incidents/{case_id}/dismiss")
+def dismiss_incident(case_id: int, payload: IncidentDismiss, principal: Principal = Depends(current_principal)):
+    with transaction(immediate=True) as connection:
+        return IncidentResponseService(connection).dismiss(principal, case_id, payload.reason)
+
+
+@router.post("/incidents/{case_id}/resolve")
+def resolve_incident(case_id: int, payload: IncidentResolve, principal: Principal = Depends(current_principal)):
+    with transaction(immediate=True) as connection:
+        return IncidentResponseService(connection).resolve(principal, case_id, payload.resolution)
